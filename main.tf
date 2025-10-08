@@ -17,6 +17,7 @@ provider "google" {
 variable "project_id" {
   description = "uclodia-424702"
   type        = string
+default="uclodia-424702"
 }
 
 variable "region" {
