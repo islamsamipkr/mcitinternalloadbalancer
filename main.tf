@@ -74,21 +74,21 @@ resource "google_compute_subnetwork" "proxy_subnet" {
 # --- 3. Serverless VPC Access Connector ---
 resource "google_vpc_access_connector" "connector" {
   project = var.project_id
-  name    = "serverless-conn"   # pick a unique name
+  name    = "serverless-conn"
   region  = var.region
-  network = google_compute_network.vpc.name
+  # network = google_compute_network.vpc.name   # <-- REMOVE this line
 
-  # choose one scaling mode; instance-based here:
+  # choose ONE scaling mode; instance-based here:
   min_instances = 2
   max_instances = 3
 
   subnet {
-    name = google_compute_subnetwork.connector_subnet.name
+    name    = google_compute_subnetwork.connector_subnet.name
+    project = var.project_id
   }
 
   depends_on = [google_project_service.apis]
 }
-
 # --- 4. Cloud Run Service ---
 resource "google_cloud_run_v2_service" "default" {
   name     = "cloud-run-service"
