@@ -74,12 +74,22 @@ resource "google_compute_subnetwork" "proxy_subnet" {
 # --- 3. Serverless VPC Access Connector ---
 # Creates a bridge between your serverless app and your VPC.
 resource "google_vpc_access_connector" "connector" {
-  name          = "serverless-connector"
-  network       = google_compute_network.vpc.id
-  ip_cidr_range = google_compute_subnetwork.connector_subnet.ip_cidr_range
-  region        = var.region
-  depends_on    = [google_project_service.apis]
+  project = var.project
+  name    = "YOUR_NAME"      # must match existing
+  region  = var.region
+  network = var.network
+
+  # choose ONE scaling mode that matches the existing connector:
+  # instance-based:
+  min_instances = 2
+  max_instances = 3
+  # OR throughput-based:
+  # min_throughput = 200
+  # max_throughput = 300
+
+  subnet { name = var.vpc_access_subnet_name }  # must match existing subnet+region
 }
+
 
 # --- 4. Cloud Run Service ---
 # Deploys a sample "hello" Cloud Run service connected to the VPC.
