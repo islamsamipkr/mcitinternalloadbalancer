@@ -9,23 +9,23 @@ terraform {
 }
 
 provider "google" {
-  project = var.project_id
-  region  = var.region
-  credentials=var.credentials
+  project     = var.project_id
+  region      = var.region
+  credentials = var.credentials
 }
 
 # --- Input Variables ---
 variable "project_id" {
-  description = "uclodia-424702"
+  description = "GCP Project ID"
   type        = string
-  default="uclodia-424702"
+  default     = "uclodia-424702"
 }
+
 variable "credentials" {
   description = "Service account JSON"
   type        = string
   sensitive   = true
 }
-
 
 variable "region" {
   description = "The GCP region for all resources."
@@ -34,8 +34,8 @@ variable "region" {
 }
 
 # --- 1. Enable Required APIs ---
-# This ensures all necessary services are active before creating resources.
 resource "google_project_service" "apis" {
+  project = var.project_id
   for_each = toset([
     "run.googleapis.com",
     "vpcaccess.googleapis.com",
@@ -56,64 +56,67 @@ resource "google_compute_network" "vpc" {
 # Subnet for the Serverless VPC Connector
 resource "google_compute_subnetwork" "connector_subnet" {
   name          = "connector-subnet"
-  ip_cidr_range = "10.8.0.0/28" # A /28 CIDR is required
-  network       = google_compute_network.vpc.id
+  ip_cidr_range = "10.8.0.0/28" # /28 is valid for connectors
+  network       = google_compute_network.vpc.name
   region        = var.region
 }
 
-# Subnet for the Internal Load Balancer's proxy
+# Proxy-only subnet for Internal L7 LB
 resource "google_compute_subnetwork" "proxy_subnet" {
   name          = "proxy-subnet"
-  purpose       = "REGIONAL_MANAGED_PROXY" # This purpose is required for the ILB
+  purpose       = "REGIONAL_MANAGED_PROXY"
   role          = "ACTIVE"
-  ip_cidr_range = "10.1.2.0/24"
-  network       = google_compute_network.vpc.id
+  ip_cidr_range = "10.1.2.0/28" # /28 is enough
+  network       = google_compute_network.vpc.name
   region        = var.region
 }
 
 # --- 3. Serverless VPC Access Connector ---
-# Creates a bridge between your serverless app and your VPC.
 resource "google_vpc_access_connector" "connector" {
-  project = var.project
-  name    = "YOUR_NAME"      # must match existing
+  project = var.project_id
+  name    = "serverless-conn"   # pick a unique name
   region  = var.region
-  network = var.network
+  network = google_compute_network.vpc.name
 
-  # choose ONE scaling mode that matches the existing connector:
-  # instance-based:
+  # choose one scaling mode; instance-based here:
   min_instances = 2
   max_instances = 3
-  # OR throughput-based:
-  # min_throughput = 200
-  # max_throughput = 300
 
-  subnet { name = var.vpc_access_subnet_name }  # must match existing subnet+region
+  subnet {
+    name = google_compute_subnetwork.connector_subnet.name
+  }
+
+  depends_on = [google_project_service.apis]
 }
 
-
 # --- 4. Cloud Run Service ---
-# Deploys a sample "hello" Cloud Run service connected to the VPC.
 resource "google_cloud_run_v2_service" "default" {
   name     = "cloud-run-service"
   location = var.region
-  ingress  = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER" # Restricts traffic to the ILB
+
+  # Valid values: INGRESS_TRAFFIC_ALL, INGRESS_TRAFFIC_INTERNAL_ONLY,
+  # INGRESS_TRAFFIC_INTERNAL_AND_CLOUD_LOAD_BALANCING
+  ingress  = "INGRESS_TRAFFIC_INTERNAL_ONLY"  # for an internal ILB
+  # (If you also plan to front with an external ALB, use
+  #  INGRESS_TRAFFIC_INTERNAL_AND_CLOUD_LOAD_BALANCING)
 
   template {
     containers {
       image = "us-docker.pkg.dev/cloudrun/container/hello"
     }
-    # Link Cloud Run to the VPC Connector for egress traffic
+    # Only needed if your service makes egress calls into the VPC
     vpc_access {
       connector = google_vpc_access_connector.connector.id
       egress    = "ALL_TRAFFIC"
     }
   }
+
   depends_on = [google_vpc_access_connector.connector]
 }
 
 # --- 5. Internal Load Balancer Components ---
 
-# Serverless Network Endpoint Group (NEG) pointing to the Cloud Run service
+# Serverless NEG pointing to the Cloud Run service
 resource "google_compute_region_network_endpoint_group" "serverless_neg" {
   name                  = "cr-serverless-neg"
   network_endpoint_type = "SERVERLESS"
@@ -124,25 +127,16 @@ resource "google_compute_region_network_endpoint_group" "serverless_neg" {
   depends_on = [google_cloud_run_v2_service.default]
 }
 
-# Health Check for the backend service
-resource "google_compute_region_health_check" "default" {
-  name   = "serverless-health-check"
-  region = var.region
-  http_health_check {
-    port = 8080 # Default port for the sample Cloud Run container
-  }
-}
-
-# Backend Service that connects the NEG and Health Check
+# Backend Service (NO health checks for serverless NEGs)
 resource "google_compute_region_backend_service" "default" {
   name                  = "serverless-backend-service"
   region                = var.region
   load_balancing_scheme = "INTERNAL_MANAGED"
   protocol              = "HTTP"
+
   backend {
     group = google_compute_region_network_endpoint_group.serverless_neg.id
   }
-  health_checks = [google_compute_region_health_check.default.id]
 }
 
 # URL Map to route all traffic to the backend service
@@ -159,27 +153,15 @@ resource "google_compute_region_target_http_proxy" "default" {
   url_map = google_compute_region_url_map.default.id
 }
 
-# Forwarding Rule (the ILB's frontend IP address)
+# Forwarding Rule (ILB frontend IP)
 resource "google_compute_forwarding_rule" "default" {
   name                  = "ilb-forwarding-rule"
   region                = var.region
   load_balancing_scheme = "INTERNAL_MANAGED"
-  network               = google_compute_network.vpc.id
-  subnetwork            = google_compute_subnetwork.proxy_subnet.id
+  network               = google_compute_network.vpc.name
+  subnetwork            = google_compute_subnetwork.proxy_subnet.name
   ip_protocol           = "TCP"
   port_range            = "80"
   target                = google_compute_region_target_http_proxy.default.id
-  allow_global_access   = true # Allows access from any region within the VPC
-}
-
-# --- 6. Firewall Rule for Health Checks ---
-# Allows GCP's health checkers to reach the load balancer.
-resource "google_compute_firewall" "allow_health_checks" {
-  name    = "fw-allow-health-checks"
-  network = google_compute_network.vpc.name
-  allow {
-    protocol = "tcp"
-    ports    = ["8080"] # Must match the health check port
-  }
-  source_ranges = ["35.191.0.0/16", "130.211.0.0/22"] # Official GCP health checker IPs
+  allow_global_access   = true
 }
